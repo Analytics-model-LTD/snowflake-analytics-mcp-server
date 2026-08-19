@@ -1,0 +1,38 @@
+{
+  "name": "snowflake-analytics-mcp-server",
+  "version": "0.1.0",
+  "description": "Snowflake MCP server for the Analytics Model platform. Exposes list_tables, describe_table, query and schema-discovery tools over stdio, runnable via npx.",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "snowflake-analytics-mcp-server": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc && node -e \"require('fs').chmodSync('dist/index.js', 0o755)\"",
+    "start": "node dist/index.js",
+    "prepublishOnly": "npm run build"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "keywords": [
+    "mcp",
+    "snowflake",
+    "analytics",
+    "database",
+    "model-context-protocol"
+  ],
+  "author": "sagar1012",
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "snowflake-sdk": "^3.2.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^26.2.0",
+    "@types/snowflake-sdk": "^1.6.24",
+    "typescript": "^7.0.2"
+  }
+}
