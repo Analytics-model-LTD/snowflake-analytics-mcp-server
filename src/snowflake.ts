@@ -7,6 +7,8 @@
  *     tool calls (stdio is single-user, so a connection pool is overkill).
  *   - Reconnect transparently if the session has dropped.
  *   - Provide a promisified query runner and safe identifier quoting.
+ *   - Resolve a usable database, falling back to SNOWFLAKE_DATABASE when a
+ *     caller passes one that isn't accessible.
  *
  * Auth modes (pick via SNOWFLAKE_AUTHENTICATOR, default = password):
  *   - SNOWFLAKE            : username + password
@@ -36,6 +38,8 @@ export interface SnowflakeConfig {
   queryTimeoutMs: number;
   rowLimit: number;
   readOnly: boolean;
+  cortexEnabled: boolean;
+  cortexModel: string;
 }
 
 function req(name: string): string {
@@ -82,7 +86,11 @@ export function loadConfig(): SnowflakeConfig {
     role: process.env.SNOWFLAKE_ROLE?.trim(),
     queryTimeoutMs: Number(process.env.QUERY_TIMEOUT_MS || 60000),
     rowLimit: Number(process.env.SNOWFLAKE_ROW_LIMIT || 1000),
+    // Read-only by default. Only an explicit "false" opens up writes/DDL.
     readOnly: (process.env.SNOWFLAKE_READ_ONLY || "true").toLowerCase() !== "false",
+    // Cortex AI tools are on by default; set SNOWFLAKE_CORTEX_ENABLED=false to hide them.
+    cortexEnabled: (process.env.SNOWFLAKE_CORTEX_ENABLED || "true").toLowerCase() !== "false",
+    cortexModel: (process.env.SNOWFLAKE_CORTEX_MODEL || "llama3.1-8b").trim(),
   };
 }
 
@@ -141,8 +149,6 @@ export async function runQuery(
     connection.execute({
       sqlText,
       binds: binds as snowflake.Binds,
-      // Cap runaway queries at the configured timeout.
-      // (SDK-level; server-side statement_timeout can also be set.)
       complete: (err, _stmt, r) => {
         if (err) reject(err);
         else resolve((r as Record<string, unknown>[]) || []);
@@ -189,6 +195,47 @@ export function qualify(
   if (sc) parts.push(quoteIdent(sc));
   parts.push(quoteIdent(table));
   return parts.join(".");
+}
+
+// ── Database resolution ───────────────────────────────────────────────────────
+// Cached uppercase set of databases the current role can actually see.
+let dbCache: Set<string> | null = null;
+
+export async function accessibleDatabases(): Promise<Set<string>> {
+  if (dbCache && dbCache.size) return dbCache;
+  const names = new Set<string>();
+  try {
+    const { rows } = await runQuery("SHOW DATABASES");
+    for (const r of rows) {
+      const n = (r as Record<string, unknown>).name;
+      if (typeof n === "string") names.add(n.toUpperCase());
+    }
+  } catch {
+    /* ignore — resolveDatabase will trust the caller's input below */
+  }
+  if (names.size) dbCache = names;
+  return names;
+}
+
+/**
+ * Resolve the database a tool should use.
+ *
+ * If `requested` is provided but isn't an accessible database (e.g. an upstream
+ * caller sent a stray value that isn't a real database), fall back to the
+ * configured SNOWFLAKE_DATABASE instead of erroring — so tools self-correct on
+ * the first call rather than taking a failed detour.
+ */
+export async function resolveDatabase(requested?: string): Promise<string | undefined> {
+  const fallback = getConfig().database;
+  const wanted = requested?.trim();
+  if (!wanted) return fallback;
+
+  const dbs = await accessibleDatabases();
+  // Couldn't enumerate databases — trust the caller, then the default.
+  if (dbs.size === 0) return wanted || fallback;
+  if (dbs.has(wanted.toUpperCase())) return wanted;
+  // Requested database isn't accessible — use the configured default.
+  return fallback || wanted;
 }
 
 const WRITE_RE =

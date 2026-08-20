@@ -3,9 +3,9 @@
  *
  * `list_tables` is registered first and follows the platform's double-wrapped
  * envelope contract (see listTables.ts). The remaining tools are standard
- * SQL-database helpers that return clean JSON rows, mirroring the shape of the
- * oracle-sqlplus-mcp server (test_connection, describe_table, get_table_sample,
- * execute_query, list_schemas, ...).
+ * SQL-database helpers (test_connection, describe_table, get_table_sample,
+ * execute_query, list_schemas, ...). Cortex AI tools are registered last and
+ * only when enabled.
  */
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
@@ -14,9 +14,11 @@ import {
   runQuery,
   quoteIdent,
   qualify,
+  resolveDatabase,
   isReadOnlyStatement,
 } from "../snowflake.js";
 import { registerListTables } from "./listTables.js";
+import { registerCortexTools } from "./cortex.js";
 
 function jsonText(value: unknown) {
   return { content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }] };
@@ -55,9 +57,9 @@ export function registerTools(server: McpServer): void {
       try {
         const { rows } = await runQuery(
           "SELECT CURRENT_VERSION() AS VERSION, CURRENT_ACCOUNT() AS ACCOUNT, " +
-            "CURRENT_USER() AS \"USER\", CURRENT_ROLE() AS ROLE, " +
-            "CURRENT_WAREHOUSE() AS WAREHOUSE, CURRENT_DATABASE() AS DATABASE, " +
-            "CURRENT_SCHEMA() AS SCHEMA"
+          "CURRENT_USER() AS \"USER\", CURRENT_ROLE() AS ROLE, " +
+          "CURRENT_WAREHOUSE() AS WAREHOUSE, CURRENT_DATABASE() AS DATABASE, " +
+          "CURRENT_SCHEMA() AS SCHEMA"
         );
         return jsonText({ connected: true, ...(rows[0] || {}) });
       } catch (err) {
@@ -107,7 +109,7 @@ export function registerTools(server: McpServer): void {
     },
     async (args: { database?: string }) => {
       try {
-        const db = args.database || getConfig().database;
+        const db = (await resolveDatabase(args.database)) || getConfig().database;
         if (!db) throw new Error("No database. Set SNOWFLAKE_DATABASE or pass `database`.");
         const { rows } = await runQuery(
           `SELECT SCHEMA_NAME FROM ${quoteIdent(db)}.INFORMATION_SCHEMA.SCHEMATA ORDER BY SCHEMA_NAME`
@@ -160,7 +162,7 @@ export function registerTools(server: McpServer): void {
     async (args: { table: string; database?: string; schema?: string }) => {
       try {
         const c = getConfig();
-        const db = args.database || c.database;
+        const db = (await resolveDatabase(args.database)) || c.database;
         const sc = args.schema || c.schema;
         if (!db) throw new Error("No database. Set SNOWFLAKE_DATABASE or pass `database`.");
         const conditions = ["TABLE_NAME = ?"];
@@ -171,9 +173,9 @@ export function registerTools(server: McpServer): void {
         }
         const { rows } = await runQuery(
           `SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE, COLUMN_DEFAULT, ` +
-            `CHARACTER_MAXIMUM_LENGTH, NUMERIC_PRECISION, NUMERIC_SCALE ` +
-            `FROM ${quoteIdent(db)}.INFORMATION_SCHEMA.COLUMNS ` +
-            `WHERE ${conditions.join(" AND ")} ORDER BY ORDINAL_POSITION`,
+          `CHARACTER_MAXIMUM_LENGTH, NUMERIC_PRECISION, NUMERIC_SCALE ` +
+          `FROM ${quoteIdent(db)}.INFORMATION_SCHEMA.COLUMNS ` +
+          `WHERE ${conditions.join(" AND ")} ORDER BY ORDINAL_POSITION`,
           binds
         );
         if (!rows.length) throw new Error(`Table "${args.table}" not found or no columns visible.`);
@@ -207,7 +209,8 @@ export function registerTools(server: McpServer): void {
       try {
         const c = getConfig();
         const limit = Math.min(args.limit ?? 10, c.rowLimit);
-        const fqn = qualify(args.table, args.database, args.schema);
+        const db = (await resolveDatabase(args.database)) || c.database;
+        const fqn = qualify(args.table, db, args.schema);
         const { rows } = await runQuery(`SELECT * FROM ${fqn} LIMIT ${limit}`);
         return jsonText(rows);
       } catch (err) {
@@ -234,7 +237,7 @@ export function registerTools(server: McpServer): void {
         if (c.readOnly && !isReadOnlyStatement(args.query)) {
           throw new Error(
             "Write/DDL statements are blocked. The server is read-only " +
-              "(set SNOWFLAKE_READ_ONLY=false to allow them)."
+            "(set SNOWFLAKE_READ_ONLY=false to allow them)."
           );
         }
         const { rows, rowCount } = await runQuery(args.query);
@@ -251,4 +254,9 @@ export function registerTools(server: McpServer): void {
       }
     }
   );
+
+  // 9) Cortex AI tools (opt-out via SNOWFLAKE_CORTEX_ENABLED=false).
+  if (getConfig().cortexEnabled) {
+    registerCortexTools(server);
+  }
 }

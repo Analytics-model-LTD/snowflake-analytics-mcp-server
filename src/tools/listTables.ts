@@ -1,24 +1,23 @@
 /**
  * listTables.ts — table-discovery tool for the Analytics Model platform.
  *
- * The platform's MCP connector flow (fetchMcpTables) expects every MCP server
- * to expose a `list_tables` tool whose result text, once unwrapped, yields a
- * flat array of { table_name } objects.
+ * The platform's connector flow expects a `list_tables` tool whose result text,
+ * once unwrapped, yields a flat array of { table_name } objects.
  *
- * OUTPUT SHAPE — copied byte-for-byte from the working Shopify / Clio servers.
- * The platform parser expects:
+ * OUTPUT SHAPE — the platform parser expects:
  *   1. The tool result text is JSON.stringify of an object with a `data` field.
  *   2. `data` is ITSELF a JSON string of the [{ table_name }] array.
  * i.e. the array is DOUBLE-stringified. Do not "simplify" this to a raw array
  * or the backend parse fails and the table dropdown stays empty.
  *
- * Unlike Clio (a REST API with fixed resource categories), Snowflake is a real
- * database, so we query INFORMATION_SCHEMA for the live table list scoped to the
- * connection's database/schema (overridable via arguments).
+ * Snowflake is a real database, so the live table list is read from
+ * INFORMATION_SCHEMA, scoped to the connection's database/schema (overridable
+ * via arguments). If a caller passes a database that isn't accessible, the tool
+ * falls back to the configured SNOWFLAKE_DATABASE.
  */
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { getConfig, runQuery, quoteIdent } from "../snowflake.js";
+import { getConfig, runQuery, quoteIdent, resolveDatabase } from "../snowflake.js";
 
 interface PlatformEnvelope {
   is_success: boolean;
@@ -72,7 +71,8 @@ export function registerListTables(server: McpServer): void {
       include_views?: boolean;
     }) => {
       const c = getConfig();
-      const database = args.database || c.database;
+      // Resolve to an accessible database, falling back to SNOWFLAKE_DATABASE.
+      const database = (await resolveDatabase(args.database)) || c.database;
       const schema = args.schema || c.schema;
       const includeViews = args.include_views !== false;
       const requestedPayload = { database, schema, include_views: includeViews };

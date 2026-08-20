@@ -1,8 +1,6 @@
 # snowflake-analytics-mcp-server
 
-A [Model Context Protocol](https://modelcontextprotocol.io) server for **Snowflake**, built for the Analytics Model platform. It connects to Snowflake via the official `snowflake-sdk` driver (pure Node — no client binary needed, unlike the Oracle server) and exposes table-discovery and query tools over stdio. Runnable directly with `npx`.
-
-The `list_tables` tool returns the platform's exact table-discovery envelope, so it drops straight into the same `fetchMcpTables` flow as the Clio, Dropbox and Shopify servers.
+A [Model Context Protocol](https://modelcontextprotocol.io) server for **Snowflake**. It connects to Snowflake via the official `snowflake-sdk` driver (pure Node — no client binary needed) and exposes table-discovery, SQL query, and Cortex AI tools over stdio. Runnable directly with `npx`.
 
 ## Install
 
@@ -22,7 +20,7 @@ All credentials come from environment variables.
 | `SNOWFLAKE_USERNAME` | ✅ | — | Login name |
 | `SNOWFLAKE_PASSWORD` | ✅ (password auth) | — | Password (required unless using key-pair/OAuth) |
 | `SNOWFLAKE_WAREHOUSE` | — | — | Virtual warehouse to use |
-| `SNOWFLAKE_DATABASE` | recommended | — | Default database (used by `list_tables` when no arg is given) |
+| `SNOWFLAKE_DATABASE` | recommended | — | Default database (used by `list_tables`, and as the fallback when a caller passes an inaccessible database) |
 | `SNOWFLAKE_SCHEMA` | recommended | — | Default schema |
 | `SNOWFLAKE_ROLE` | — | — | Role to assume |
 | `SNOWFLAKE_AUTHENTICATOR` | — | `SNOWFLAKE` | `SNOWFLAKE` (password), `SNOWFLAKE_JWT` (key-pair), `OAUTH` |
@@ -33,6 +31,8 @@ All credentials come from environment variables.
 | `SNOWFLAKE_READ_ONLY` | — | `true` | Blocks writes/DDL in `execute_query`. Set `false` to allow them |
 | `SNOWFLAKE_ROW_LIMIT` | — | `1000` | Hard cap on returned rows |
 | `QUERY_TIMEOUT_MS` | — | `60000` | Client-side query timeout |
+| `SNOWFLAKE_CORTEX_ENABLED` | — | `true` | Register the Cortex AI tools. Set `false` to hide them |
+| `SNOWFLAKE_CORTEX_MODEL` | — | `llama3.1-8b` | Default model for Cortex AI_COMPLETE / text-to-SQL |
 
 ### Account identifier tip
 
@@ -78,9 +78,11 @@ Add to `claude_desktop_config.json`:
 
 ## Tools
 
+### SQL & discovery
+
 | Tool | Args | Description |
 |---|---|---|
-| `list_tables` | `database?`, `schema?`, `include_views?` | **Platform contract.** Returns `{ table_name }[]` in the double-wrapped envelope for `fetchMcpTables` |
+| `list_tables` | `database?`, `schema?`, `include_views?` | Returns `{ table_name }[]` for table discovery |
 | `test_connection` | — | Returns version, account, user, role, warehouse, database, schema |
 | `list_databases` | — | Databases visible to the current role |
 | `list_schemas` | `database?` | Schemas in a database |
@@ -89,21 +91,26 @@ Add to `claude_desktop_config.json`:
 | `get_table_sample` | `table`, `database?`, `schema?`, `limit?` | Preview rows from a table |
 | `execute_query` | `query` | Run SQL. Read-only unless `SNOWFLAKE_READ_ONLY=false` |
 
-## Platform integration note
+### Cortex AI
 
-`list_tables` matches the confirmed envelope used by the Shopify/Clio servers:
+These are additive generative-AI tools (token-billed, higher latency than the SQL tools). Each is invoked as a `SELECT`, so they work with `SNOWFLAKE_READ_ONLY=true`. Disable them with `SNOWFLAKE_CORTEX_ENABLED=false`.
 
-```jsonc
-{
-  "is_success": true,
-  "status_code": 200,
-  "data": "[{\"table_name\":\"ORDERS\"},{\"table_name\":\"CUSTOMERS\"}]", // double-stringified
-  "message": "Found 2 table(s).",
-  "requestedPayload": { "database": "ANALYTICS_DB", "schema": "PUBLIC", "include_views": true }
-}
-```
+| Tool | Args | Description |
+|---|---|---|
+| `cortex_ask` | `question`, `database?`, `schema?`, `model?` | Natural-language question → generated read-only SQL → answer. Best for analytics like "what is total revenue" |
+| `cortex_complete` | `prompt`, `model?` | Free-form LLM completion via AI_COMPLETE |
+| `cortex_sentiment` | `text` | Sentiment of a text via AI_SENTIMENT |
+| `cortex_summarize` | `text` | Concise summary of a text |
+| `cortex_classify` | `text`, `categories[]` | Classify text into your categories via AI_CLASSIFY |
+| `cortex_translate` | `text`, `to_language`, `from_language?` | Translate text (source auto-detected when omitted) |
 
-Because Snowflake exposes **arbitrary** user tables (unlike Clio's fixed resource categories, which each had a `list_<resource>` tool), there is no per-table tool. When a user selects a table in the platform, the backend should fetch its rows via `get_table_sample` (preview) or `execute_query` (`SELECT * FROM <table>`), rather than calling a tool named after the table. Confirm this mapping with the backend before wiring the row-fetch step.
+`cortex_ask` generates SQL and always restricts it to read-only statements, regardless of `SNOWFLAKE_READ_ONLY`.
+
+**Cortex prerequisites:** the account must be in a region that supports Cortex, and the connecting role needs the `SNOWFLAKE.CORTEX_USER` database role plus the `USE AI FUNCTIONS` privilege. If a Cortex call fails on region or privileges, the tool returns a hint explaining what to grant.
+
+## Database resolution
+
+`list_tables`, `describe_table`, `get_table_sample`, `list_schemas`, and `cortex_ask` accept an optional `database`. If the value passed isn't an accessible database, the tool falls back to `SNOWFLAKE_DATABASE` instead of erroring — so a stray or wrong database name from an upstream caller doesn't cause a failed lookup.
 
 ## License
 
