@@ -103,7 +103,7 @@ These are additive generative-AI tools (token-billed, higher latency than the SQ
 | `cortex_summarize` | `text` | Concise summary of a text |
 | `cortex_classify` | `text`, `categories[]` | Classify text into your categories via AI_CLASSIFY |
 | `cortex_translate` | `text`, `to_language`, `from_language?` | Translate text (source auto-detected when omitted) |
-
+| `SNOWFLAKE_PARTNER_CSID` | recommended | AnalyticsModel_MCP | Partner Connection String Identifier registered on SPN; sent as the Snowflake application tag for Connected-Application telemetry |
 `cortex_ask` generates SQL and always restricts it to read-only statements, regardless of `SNOWFLAKE_READ_ONLY`.
 
 **Cortex prerequisites:** the account must be in a region that supports Cortex, and the connecting role needs the `SNOWFLAKE.CORTEX_USER` database role plus the `USE AI FUNCTIONS` privilege. If a Cortex call fails on region or privileges, the tool returns a hint explaining what to grant.

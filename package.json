@@ -1,6 +1,6 @@
 {
   "name": "snowflake-analytics-mcp-server",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Snowflake MCP server for the Analytics Model platform. Table discovery, SQL query, and Cortex AI tools over stdio, runnable via npx.",
   "type": "module",
   "main": "dist/index.js",

@@ -13,7 +13,7 @@ import { registerTools } from "./tools/index.js";
 async function main(): Promise<void> {
   const server = new McpServer({
     name: "snowflake-analytics-mcp-server",
-    version: "0.2.0",
+    version: "0.2.1",
     title: "Snowflake Analytics MCP Server",
   });
 

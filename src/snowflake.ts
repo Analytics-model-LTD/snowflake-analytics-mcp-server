@@ -40,6 +40,7 @@ export interface SnowflakeConfig {
   readOnly: boolean;
   cortexEnabled: boolean;
   cortexModel: string;
+  csid: string;
 }
 
 function req(name: string): string {
@@ -50,23 +51,70 @@ function req(name: string): string {
   return v.trim();
 }
 
+/**
+ * Validate the partner CSID before it's used as the `application` connection
+ * option. The snowflake-sdk validates this field, so fail loudly here with a
+ * clear message rather than a cryptic driver error at connect time. Confirm the
+ * exact allowed shape against section 4 of the Native Connector Best Practice
+ * Guide and keep this regex aligned with it.
+ */
+function validateCsid(csid: string): string {
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,49}$/.test(csid)) {
+    throw new Error(
+      `Invalid SNOWFLAKE_PARTNER_CSID "${csid}". Allowed: letters, digits, ` +
+      `and . _ - (start alphanumeric, max 50 chars).`
+    );
+  }
+  return csid;
+}
+
+/**
+ * Normalize a private key into valid PEM regardless of how it survived transport.
+ * Handles: proper multi-line PEM, PEM with literal `\n`, PEM flattened onto one
+ * line (newlines stripped by a single-line form field), and a bare base64 body
+ * with no header/footer at all. Preserves the header type (e.g. ENCRYPTED).
+ */
+function normalizePrivateKey(raw: string): string {
+  let k = raw.trim().replace(/\\n/g, "\n");
+  const bodyMatch = k.match(
+    /-----BEGIN ([A-Z0-9 ]*PRIVATE KEY)-----([\s\S]*?)-----END [A-Z0-9 ]*PRIVATE KEY-----/
+  );
+  let header = "PRIVATE KEY";
+  let body: string;
+  if (bodyMatch) {
+    header = bodyMatch[1].trim();
+    body = bodyMatch[2].replace(/\s+/g, "");
+  } else {
+    // No header present — treat the whole value as the base64 body.
+    body = k.replace(/\s+/g, "");
+  }
+  const wrapped = body.match(/.{1,64}/g)?.join("\n") ?? body;
+  return `-----BEGIN ${header}-----\n${wrapped}\n-----END ${header}-----\n`;
+}
+
 export function loadConfig(): SnowflakeConfig {
-  const authenticator = (process.env.SNOWFLAKE_AUTHENTICATOR || "SNOWFLAKE")
+  const hasKey = !!(
+    process.env.SNOWFLAKE_PRIVATE_KEY || process.env.SNOWFLAKE_PRIVATE_KEY_PATH
+  );
+  // Auto-select key-pair auth when a private key is provided, so callers don't
+  // have to set SNOWFLAKE_AUTHENTICATOR explicitly. An explicit value still wins.
+  const authenticator = (
+    process.env.SNOWFLAKE_AUTHENTICATOR || (hasKey ? "SNOWFLAKE_JWT" : "SNOWFLAKE")
+  )
     .trim()
     .toUpperCase();
 
   let privateKey: string | undefined;
   if (authenticator === "SNOWFLAKE_JWT") {
     if (process.env.SNOWFLAKE_PRIVATE_KEY) {
-      privateKey = process.env.SNOWFLAKE_PRIVATE_KEY;
+      privateKey = normalizePrivateKey(process.env.SNOWFLAKE_PRIVATE_KEY);
     } else if (process.env.SNOWFLAKE_PRIVATE_KEY_PATH) {
-      privateKey = readFileSync(
-        process.env.SNOWFLAKE_PRIVATE_KEY_PATH.trim(),
-        "utf8"
+      privateKey = normalizePrivateKey(
+        readFileSync(process.env.SNOWFLAKE_PRIVATE_KEY_PATH.trim(), "utf8")
       );
     } else {
       throw new Error(
-        "SNOWFLAKE_AUTHENTICATOR=SNOWFLAKE_JWT requires SNOWFLAKE_PRIVATE_KEY or SNOWFLAKE_PRIVATE_KEY_PATH"
+        "Key-pair auth requires SNOWFLAKE_PRIVATE_KEY or SNOWFLAKE_PRIVATE_KEY_PATH"
       );
     }
   }
@@ -91,6 +139,9 @@ export function loadConfig(): SnowflakeConfig {
     // Cortex AI tools are on by default; set SNOWFLAKE_CORTEX_ENABLED=false to hide them.
     cortexEnabled: (process.env.SNOWFLAKE_CORTEX_ENABLED || "true").toLowerCase() !== "false",
     cortexModel: (process.env.SNOWFLAKE_CORTEX_MODEL || "llama3.1-8b").trim(),
+    // Partner Connection String Identifier — the value REGISTERED on SPN.
+    // Falls back to the legacy app name so local dev still connects.
+    csid: validateCsid((process.env.SNOWFLAKE_PARTNER_CSID || "AnalyticsModel_MCP").trim()),
   };
 }
 
@@ -108,7 +159,7 @@ function buildConnection(c: SnowflakeConfig): Connection {
     username: c.username,
     authenticator: c.authenticator,
     clientSessionKeepAlive: true,
-    application: "AnalyticsModel_MCP",
+    application: c.csid,
   };
   if (c.password) opts.password = c.password;
   if (c.token) opts.token = c.token;
