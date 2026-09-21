@@ -23,6 +23,12 @@ import snowflake, { type Connection } from "snowflake-sdk";
 // corrupt the MCP stdio stream. Route everything to stderr at ERROR level.
 snowflake.configure({ logLevel: "ERROR" });
 
+// Placeholder CSID used only for local dev when SNOWFLAKE_PARTNER_CSID is unset.
+// Connections tagged with this value are NOT attributed to the partner on SPN,
+// so getConfig() warns (once) when it's in effect. Keep this in one place so the
+// default and the "am I on the fallback?" check can never drift apart.
+const FALLBACK_CSID = "AnalyticsModel_MCP";
+
 export interface SnowflakeConfig {
   account: string;
   username: string;
@@ -53,16 +59,22 @@ function req(name: string): string {
 
 /**
  * Validate the partner CSID before it's used as the `application` connection
- * option. The snowflake-sdk validates this field, so fail loudly here with a
- * clear message rather than a cryptic driver error at connect time. Confirm the
- * exact allowed shape against section 4 of the Native Connector Best Practice
- * Guide and keep this regex aligned with it.
+ * option. The snowflake-sdk validates this field itself (first character must
+ * be a LETTER, followed by letters/digits/`._-`, with a length cap), so we
+ * mirror that here to fail loudly with a clear message rather than a cryptic
+ * driver error at connect time.
+ *
+ * NOTE: confirm the exact bounds against your INSTALLED driver version — they
+ * can shift between releases:
+ *   grep -rn "application" node_modules/snowflake-sdk/lib/connection/connection_config.js
+ * Align this regex to whatever that shows, and also to section 4 of the
+ * Snowflake Native Connector Best Practice Guide (the CSID naming convention).
  */
 function validateCsid(csid: string): string {
-  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,49}$/.test(csid)) {
+  if (!/^[A-Za-z][A-Za-z0-9._-]{0,49}$/.test(csid)) {
     throw new Error(
-      `Invalid SNOWFLAKE_PARTNER_CSID "${csid}". Allowed: letters, digits, ` +
-      `and . _ - (start alphanumeric, max 50 chars).`
+      `Invalid SNOWFLAKE_PARTNER_CSID "${csid}". Must start with a letter, then ` +
+      `letters, digits, and . _ - (max 50 chars).`
     );
   }
   return csid;
@@ -140,8 +152,9 @@ export function loadConfig(): SnowflakeConfig {
     cortexEnabled: (process.env.SNOWFLAKE_CORTEX_ENABLED || "true").toLowerCase() !== "false",
     cortexModel: (process.env.SNOWFLAKE_CORTEX_MODEL || "llama3.1-8b").trim(),
     // Partner Connection String Identifier — the value REGISTERED on SPN.
-    // Falls back to the legacy app name so local dev still connects.
-    csid: validateCsid((process.env.SNOWFLAKE_PARTNER_CSID || "AnalyticsModel_MCP").trim()),
+    // Falls back to the legacy app name so local dev still connects (see the
+    // getConfig() warning below).
+    csid: validateCsid((process.env.SNOWFLAKE_PARTNER_CSID || FALLBACK_CSID).trim()),
   };
 }
 
@@ -149,7 +162,19 @@ let cfg: SnowflakeConfig | null = null;
 let conn: Connection | null = null;
 
 export function getConfig(): SnowflakeConfig {
-  if (!cfg) cfg = loadConfig();
+  if (!cfg) {
+    cfg = loadConfig();
+    // Fires once, at first config access (startup). If we're still on the
+    // fallback, partner telemetry won't attribute these connections on SPN —
+    // make that loud in the logs so nobody ships an untracked deploy by accident.
+    if (cfg.csid === FALLBACK_CSID) {
+      process.stderr.write(
+        "WARN: SNOWFLAKE_PARTNER_CSID not set — using fallback CSID " +
+        `"${FALLBACK_CSID}". Snowflake partner telemetry will NOT attribute ` +
+        "these connections. Set the registered CSID before deploying.\n"
+      );
+    }
+  }
   return cfg;
 }
 
