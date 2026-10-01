@@ -10,7 +10,8 @@
  *   - Resolve a usable database, falling back to SNOWFLAKE_DATABASE when a
  *     caller passes one that isn't accessible.
  *
- * Auth modes (pick via SNOWFLAKE_AUTHENTICATOR, default = password):
+ * Auth modes (SNOWFLAKE_AUTHENTICATOR; auto-selects SNOWFLAKE_JWT when a private
+ * key is provided, otherwise password):
  *   - SNOWFLAKE            : username + password
  *   - SNOWFLAKE_JWT        : key-pair (SNOWFLAKE_PRIVATE_KEY or _PATH, optional passphrase)
  *   - OAUTH                : username + SNOWFLAKE_TOKEN
@@ -22,12 +23,6 @@ import snowflake, { type Connection } from "snowflake-sdk";
 // Keep the driver quiet — its default logger writes to stdout, which would
 // corrupt the MCP stdio stream. Route everything to stderr at ERROR level.
 snowflake.configure({ logLevel: "ERROR" });
-
-// Placeholder CSID used only for local dev when SNOWFLAKE_PARTNER_CSID is unset.
-// Connections tagged with this value are NOT attributed to the partner on SPN,
-// so getConfig() warns (once) when it's in effect. Keep this in one place so the
-// default and the "am I on the fallback?" check can never drift apart.
-const FALLBACK_CSID = "AnalyticsModel_MCP";
 
 export interface SnowflakeConfig {
   account: string;
@@ -151,10 +146,9 @@ export function loadConfig(): SnowflakeConfig {
     // Cortex AI tools are on by default; set SNOWFLAKE_CORTEX_ENABLED=false to hide them.
     cortexEnabled: (process.env.SNOWFLAKE_CORTEX_ENABLED || "true").toLowerCase() !== "false",
     cortexModel: (process.env.SNOWFLAKE_CORTEX_MODEL || "llama3.1-8b").trim(),
-    // Partner Connection String Identifier — the value REGISTERED on SPN.
-    // Falls back to the legacy app name so local dev still connects (see the
-    // getConfig() warning below).
-    csid: validateCsid((process.env.SNOWFLAKE_PARTNER_CSID || FALLBACK_CSID).trim()),
+    // Partner Connection String Identifier registered on SPN. Override via
+    // SNOWFLAKE_PARTNER_CSID if it ever changes.
+    csid: validateCsid((process.env.SNOWFLAKE_PARTNER_CSID || "Analytics-model").trim()),
   };
 }
 
@@ -162,19 +156,7 @@ let cfg: SnowflakeConfig | null = null;
 let conn: Connection | null = null;
 
 export function getConfig(): SnowflakeConfig {
-  if (!cfg) {
-    cfg = loadConfig();
-    // Fires once, at first config access (startup). If we're still on the
-    // fallback, partner telemetry won't attribute these connections on SPN —
-    // make that loud in the logs so nobody ships an untracked deploy by accident.
-    if (cfg.csid === FALLBACK_CSID) {
-      process.stderr.write(
-        "WARN: SNOWFLAKE_PARTNER_CSID not set — using fallback CSID " +
-        `"${FALLBACK_CSID}". Snowflake partner telemetry will NOT attribute ` +
-        "these connections. Set the registered CSID before deploying.\n"
-      );
-    }
-  }
+  if (!cfg) cfg = loadConfig();
   return cfg;
 }
 
@@ -203,7 +185,17 @@ async function ensureConnection(): Promise<Connection> {
 
   const connection = buildConnection(c);
   await new Promise<void>((resolve, reject) => {
-    connection.connect((err) => (err ? reject(err) : resolve()));
+    connection.connect((err) => {
+      if (!err) return resolve();
+      if (/multi-factor|MFA/i.test(err.message)) {
+        return reject(new Error(
+          `${err.message}\n\nThis connection uses password auth, which Snowflake blocks for ` +
+          `MFA-enforced users. Switch to key-pair auth: set SNOWFLAKE_PRIVATE_KEY and register ` +
+          `the public key on the user (ALTER USER ... SET RSA_PUBLIC_KEY), ideally a TYPE = SERVICE user.`
+        ));
+      }
+      reject(err);
+    });
   });
   conn = connection;
   return conn;

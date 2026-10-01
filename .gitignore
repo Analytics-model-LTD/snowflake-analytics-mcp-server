@@ -3,3 +3,8 @@ dist/
 *.log
 .env
 .DS_Store
+# Snowflake key-pair auth — never commit
+*.p8
+rsa_key.pub
+gen-key.mjs
+set-key.mjs
