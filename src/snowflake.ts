@@ -306,9 +306,105 @@ export async function resolveDatabase(requested?: string): Promise<string | unde
   return fallback || wanted;
 }
 
-const WRITE_RE =
-  /^\s*(INSERT|UPDATE|DELETE|MERGE|CREATE|DROP|ALTER|TRUNCATE|GRANT|REVOKE|CALL|COPY|PUT|REMOVE|USE)\b/i;
+/**
+ * Read-only guard.
+ *
+ * The old check only looked at the first word of the raw text against a deny-list, so
+ * a leading block comment in front of DROP TABLE, or a verb that was not on the list
+ * (EXECUTE IMMEDIATE ...), slipped through. This version:
+ *   1. removes comments and blanks out quoted strings / identifiers / $$ blocks,
+ *   2. rejects malformed input (unterminated comment or string),
+ *   3. rejects more than one statement,
+ *   4. only allows statements that START with an allow-listed read verb,
+ *   5. rejects any write/DDL keyword that still appears as a bare word.
+ *
+ * This is defense in depth. The real boundary must be a Snowflake role that only has
+ * SELECT/USAGE privileges (see README, "Security").
+ */
+function sanitizeSql(sql: string): string | null {
+  let out = "";
+  let i = 0;
+  const n = sql.length;
+  while (i < n) {
+    const ch = sql[i];
+    const next = sql[i + 1];
+
+    // line comments: -- and //
+    if ((ch === "-" && next === "-") || (ch === "/" && next === "/")) {
+      while (i < n && sql[i] !== "\n") i++;
+      out += " ";
+      continue;
+    }
+    // block comment
+    if (ch === "/" && next === "*") {
+      const end = sql.indexOf("*/", i + 2);
+      if (end === -1) return null; // unterminated
+      i = end + 2;
+      out += " ";
+      continue;
+    }
+    // $$ ... $$ dollar-quoted block
+    if (ch === "$" && next === "$") {
+      const end = sql.indexOf("$$", i + 2);
+      if (end === -1) return null;
+      i = end + 2;
+      out += "''";
+      continue;
+    }
+    // '...' string (supports '' and backslash escapes)
+    if (ch === "'") {
+      i++;
+      let closed = false;
+      while (i < n) {
+        if (sql[i] === "\\") { i += 2; continue; }
+        if (sql[i] === "'") {
+          if (sql[i + 1] === "'") { i += 2; continue; }
+          i++;
+          closed = true;
+          break;
+        }
+        i++;
+      }
+      if (!closed) return null;
+      out += "''";
+      continue;
+    }
+    // "..." quoted identifier (supports "")
+    if (ch === '"') {
+      i++;
+      let closed = false;
+      while (i < n) {
+        if (sql[i] === '"') {
+          if (sql[i + 1] === '"') { i += 2; continue; }
+          i++;
+          closed = true;
+          break;
+        }
+        i++;
+      }
+      if (!closed) return null;
+      out += '""';
+      continue;
+    }
+    out += ch;
+    i++;
+  }
+  return out;
+}
+
+const READ_START_RE = /^(SELECT|WITH|SHOW|DESCRIBE|DESC|EXPLAIN)\b/i;
+const WRITE_WORD_RE =
+  /\b(INSERT|UPDATE|DELETE|MERGE|CREATE|DROP|ALTER|TRUNCATE|GRANT|REVOKE|CALL|COPY|PUT|REMOVE|UNDROP|EXECUTE|USE)\b/i;
 
 export function isReadOnlyStatement(sql: string): boolean {
-  return !WRITE_RE.test(sql);
+  if (typeof sql !== "string") return false;
+  const clean = sanitizeSql(sql);
+  if (clean === null) return false;
+
+  const text = clean.trim().replace(/;\s*$/, "").trim(); // allow one trailing ;
+  if (!text) return false;
+  if (text.includes(";")) return false;            // no multi-statement
+  if (!READ_START_RE.test(text)) return false;     // allow-list, not deny-list
+  if (WRITE_WORD_RE.test(text)) return false;      // e.g. WITH ... INSERT
+  return true;
 }
